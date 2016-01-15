@@ -15,4 +15,5 @@ This implementation forwards UDP using standard SOCKS5 UDP request/reply. Thus t
 
 - https://github.com/google/gopacket
 - https://github.com/ambrop72/badvpn/
+- https://github.com/songgao/water
 
