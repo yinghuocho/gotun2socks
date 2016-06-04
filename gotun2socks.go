@@ -2,6 +2,7 @@ package gotun2socks
 
 import (
 	"log"
+	"net"
 	"os"
 	"sync"
 	"syscall"
@@ -18,13 +19,18 @@ const (
 var (
 	localSocksDialer *gosocks.SocksDialer = &gosocks.SocksDialer{
 		Auth:    &gosocks.AnonymousClientAuthenticator{},
-		Timeout: time.Second,
+		Timeout: 1 * time.Minute,
 	}
+
+	_, ip1, _ = net.ParseCIDR("10.0.0.0/8")
+	_, ip2, _ = net.ParseCIDR("172.16.0.0/12")
+	_, ip3, _ = net.ParseCIDR("192.168.0.0/24")
 )
 
 type Tun2Socks struct {
 	dev            *os.File
 	localSocksAddr string
+	publicOnly     bool
 
 	writerStopCh chan bool
 	readerStopCh chan bool
@@ -35,21 +41,31 @@ type Tun2Socks struct {
 
 	udpConnTrackLock sync.Mutex
 	udpConnTrackMap  map[string]*udpConnTrack
+	cache            *dnsCache
+}
+
+func isPrivate(ip net.IP) bool {
+	return ip1.Contains(ip) || ip2.Contains(ip) || ip3.Contains(ip)
 }
 
 func dialLocalSocks(localAddr string) (*gosocks.SocksConn, error) {
 	return localSocksDialer.Dial(localAddr)
 }
 
-func New(dev *os.File, localSocksAddr string) *Tun2Socks {
+func New(dev *os.File, localSocksAddr string, dnsServers []string, publicOnly bool) *Tun2Socks {
 	return &Tun2Socks{
 		dev:             dev,
 		localSocksAddr:  localSocksAddr,
+		publicOnly:      publicOnly,
 		writerStopCh:    make(chan bool, 10),
 		readerStopCh:    make(chan bool, 10),
 		writeCh:         make(chan interface{}, 10000),
 		tcpConnTrackMap: make(map[string]*tcpConnTrack),
 		udpConnTrackMap: make(map[string]*udpConnTrack),
+		cache: &dnsCache{
+			servers: dnsServers,
+			storage: make(map[string]*dnsCacheEntry),
+		},
 	}
 }
 
@@ -117,6 +133,15 @@ func (t2s *Tun2Socks) Run() {
 				log.Printf("error to parse IPv4: %s", e)
 				continue
 			}
+			if t2s.publicOnly {
+				if !ip.DstIP.IsGlobalUnicast() {
+					continue
+				}
+				if isPrivate(ip.DstIP) {
+					continue
+				}
+			}
+
 			switch ip.Protocol {
 			case packet.IPProtocolTCP:
 				e = packet.ParseTCP(ip.Payload, &tcp)

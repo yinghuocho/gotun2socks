@@ -38,9 +38,9 @@ type tcpConnTrack struct {
 	id  string
 
 	input        chan *tcpPacket
-	tunWriteCh   chan<- interface{}
-	socksReadCh  chan []byte
-	socksWriteCh chan *tcpPacket
+	toTunCh      chan<- interface{}
+	fromSocksCh  chan []byte
+	toSocksCh    chan *tcpPacket
 	socksCloseCh chan bool
 	quitBySelf   chan bool
 	quitByOther  chan bool
@@ -261,7 +261,7 @@ func (tt *tcpConnTrack) validSeq(pkt *tcpPacket) bool {
 func (tt *tcpConnTrack) relayPayload(pkt *tcpPacket) bool {
 	payloadLen := uint32(len(pkt.tcp.Payload))
 	select {
-	case tt.socksWriteCh <- pkt:
+	case tt.toSocksCh <- pkt:
 		tt.rcvNxtSeq += payloadLen
 		return true
 	case <-tt.socksCloseCh:
@@ -274,7 +274,7 @@ func (tt *tcpConnTrack) send(pkt *tcpPacket) {
 	if pkt.tcp.ACK {
 		tt.lastAck = pkt.tcp.Ack
 	}
-	tt.tunWriteCh <- pkt
+	tt.toTunCh <- pkt
 }
 
 func (tt *tcpConnTrack) synAck(syn *tcpPacket) {
@@ -387,7 +387,7 @@ func (tt *tcpConnTrack) stateClosed(syn *tcpPacket) (continu bool, release bool)
 	}
 	if tt.socksConn == nil {
 		resp := rstByPacket(syn)
-		tt.tunWriteCh <- resp.wire
+		tt.toTunCh <- resp.wire
 		// log.Printf("<-- [TCP][%s][RST]", tt.id)
 		return false, true
 	}
@@ -463,7 +463,7 @@ func (tt *tcpConnTrack) stateSynRcvd(pkt *tcpPacket) (continu bool, release bool
 	if !(tt.validSeq(pkt) && tt.validAck(pkt)) {
 		if !pkt.tcp.RST {
 			resp := rstByPacket(pkt)
-			tt.tunWriteCh <- resp
+			tt.toTunCh <- resp
 			// log.Printf("<-- [TCP][%s][RST] continue", tt.id)
 		}
 		return true, true
@@ -480,7 +480,7 @@ func (tt *tcpConnTrack) stateSynRcvd(pkt *tcpPacket) (continu bool, release bool
 	continu = true
 	release = true
 	tt.changeState(ESTABLISHED)
-	go tcpSocks2Tun(tt.remoteIP, uint16(tt.remotePort), tt.socksConn, tt.socksReadCh, tt.socksWriteCh, tt.socksCloseCh)
+	go tcpSocks2Tun(tt.remoteIP, uint16(tt.remotePort), tt.socksConn, tt.fromSocksCh, tt.toSocksCh, tt.socksCloseCh)
 	if len(pkt.tcp.Payload) != 0 {
 		if tt.relayPayload(pkt) {
 			// pkt hands to socks writer
@@ -617,11 +617,11 @@ func (tt *tcpConnTrack) run() {
 
 		var ackTimeout <-chan time.Time
 		var socksCloseCh chan bool
-		var socksReadCh chan []byte
+		var fromSocksCh chan []byte
 		// enable some channels only when the state is ESTABLISHED
 		if tt.state == ESTABLISHED {
 			socksCloseCh = tt.socksCloseCh
-			socksReadCh = tt.socksReadCh
+			fromSocksCh = tt.fromSocksCh
 			ackTimer = time.NewTimer(100 * time.Millisecond)
 			ackTimeout = ackTimer.C
 		}
@@ -664,7 +664,7 @@ func (tt *tcpConnTrack) run() {
 				tt.ack()
 			}
 
-		case data := <-socksReadCh:
+		case data := <-fromSocksCh:
 			tt.payload(data)
 
 		case <-socksCloseCh:
@@ -700,10 +700,10 @@ func (t2s *Tun2Socks) createTCPConnTrack(id string, ip *packet.IPv4, tcp *packet
 	track := &tcpConnTrack{
 		t2s:          t2s,
 		id:           id,
-		tunWriteCh:   t2s.writeCh,
+		toTunCh:      t2s.writeCh,
 		input:        make(chan *tcpPacket, 10000),
-		socksReadCh:  make(chan []byte, 100),
-		socksWriteCh: make(chan *tcpPacket, 100),
+		fromSocksCh:  make(chan []byte, 100),
+		toSocksCh:    make(chan *tcpPacket, 100),
 		socksCloseCh: make(chan bool),
 		quitBySelf:   make(chan bool),
 		quitByOther:  make(chan bool),

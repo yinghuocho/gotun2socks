@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/miekg/dns"
+
 	"github.com/yinghuocho/gosocks"
 	"github.com/yinghuocho/gotun2socks/internal/packet"
 )
@@ -23,12 +25,12 @@ type udpConnTrack struct {
 	t2s *Tun2Socks
 	id  string
 
-	tunWriteCh  chan<- interface{}
+	toTunCh     chan<- interface{}
 	quitBySelf  chan bool
 	quitByOther chan bool
 
-	socksWriteCh chan *udpPacket
-	socksClosed  chan bool
+	fromTunCh   chan *udpPacket
+	socksClosed chan bool
 
 	localSocksAddr string
 	socksConn      *gosocks.SocksConn
@@ -96,19 +98,21 @@ func copyUDPPacket(raw []byte, ip *packet.IPv4, udp *packet.UDP) *udpPacket {
 	return pkt
 }
 
-func (ut *udpConnTrack) send(data []byte) {
+func responsePacket(local net.IP, remote net.IP, lPort uint16, rPort uint16, respPayload []byte) *udpPacket {
 	ip := packet.NewIPv4()
 	udp := packet.NewUDP()
 
 	ip.Version = 4
-	ip.SrcIP = ut.remoteIP
-	ip.DstIP = ut.localIP
+	ip.SrcIP = make(net.IP, len(remote))
+	copy(ip.SrcIP, remote)
+	ip.DstIP = make(net.IP, len(local))
+	copy(ip.DstIP, local)
 	ip.TTL = 64
 	ip.Protocol = packet.IPProtocolUDP
 
-	udp.SrcPort = ut.remotePort
-	udp.DstPort = ut.localPort
-	udp.Payload = data
+	udp.SrcPort = rPort
+	udp.DstPort = lPort
+	udp.Payload = respPayload
 
 	pkt := newUDPPacket()
 	pkt.ip = ip
@@ -132,8 +136,12 @@ func (ut *udpConnTrack) send(data []byte) {
 	ip.Serialize(pkt.mtuBuf[ipStart:udpStart], udpHL+payloadL)
 
 	pkt.wire = pkt.mtuBuf[ipStart:]
+	return pkt
+}
 
-	ut.tunWriteCh <- pkt
+func (ut *udpConnTrack) send(data []byte) {
+	pkt := responsePacket(ut.localIP, ut.remoteIP, ut.localPort, ut.remotePort, data)
+	ut.toTunCh <- pkt
 	// log.Printf("<-- [UDP][%s]", ut.id)
 }
 
@@ -237,10 +245,13 @@ func (ut *udpConnTrack) run() {
 			if udpReq.Frag != gosocks.SocksNoFragment {
 				continue
 			}
+			if ut.t2s.cache.isDNS(ut.remoteIP.String(), ut.remotePort) {
+				ut.t2s.cache.store(udpReq.Data)
+			}
 			ut.send(udpReq.Data)
 
 		// pkt from tun
-		case pkt := <-ut.socksWriteCh:
+		case pkt := <-ut.fromTunCh:
 			req := &gosocks.UDPRequest{
 				Frag:     0,
 				HostType: gosocks.SocksIPv4Host,
@@ -287,7 +298,7 @@ func (ut *udpConnTrack) newPacket(pkt *udpPacket) {
 	select {
 	case <-ut.quitByOther:
 	case <-ut.quitBySelf:
-	case ut.socksWriteCh <- pkt:
+	case ut.fromTunCh <- pkt:
 		// log.Printf("--> [UDP][%s]", ut.id)
 	}
 }
@@ -309,13 +320,13 @@ func (t2s *Tun2Socks) getUDPConnTrack(id string, ip *packet.IPv4, udp *packet.UD
 		return track
 	} else {
 		track := &udpConnTrack{
-			t2s:          t2s,
-			id:           id,
-			tunWriteCh:   t2s.writeCh,
-			socksWriteCh: make(chan *udpPacket, 100),
-			socksClosed:  make(chan bool),
-			quitBySelf:   make(chan bool),
-			quitByOther:  make(chan bool),
+			t2s:         t2s,
+			id:          id,
+			toTunCh:     t2s.writeCh,
+			fromTunCh:   make(chan *udpPacket, 100),
+			socksClosed: make(chan bool),
+			quitBySelf:  make(chan bool),
+			quitByOther: make(chan bool),
 
 			localPort:  udp.SrcPort,
 			remotePort: udp.DstPort,
@@ -335,8 +346,110 @@ func (t2s *Tun2Socks) getUDPConnTrack(id string, ip *packet.IPv4, udp *packet.UD
 }
 
 func (t2s *Tun2Socks) udp(raw []byte, ip *packet.IPv4, udp *packet.UDP) {
-	connID := udpConnID(ip, udp)
-	pkt := copyUDPPacket(raw, ip, udp)
-	track := t2s.getUDPConnTrack(connID, ip, udp)
-	track.newPacket(pkt)
+	var buf [1024]byte
+	var done bool = false
+
+	// first look at dns cache
+	if t2s.cache.isDNS(ip.DstIP.String(), udp.DstPort) {
+		answer := t2s.cache.query(udp.Payload)
+		if answer != nil {
+			data, e := answer.PackBuffer(buf[:])
+			if e == nil {
+				resp := responsePacket(ip.SrcIP, ip.DstIP, udp.SrcPort, udp.DstPort, data)
+				select {
+				case t2s.writeCh <- resp:
+				default:
+					go func() {
+						t2s.writeCh <- resp
+					}()
+				}
+				log.Printf("answer a DNS query from cache")
+				done = true
+			}
+		}
+	}
+
+	// then open a udpConnTrack to forward
+	if !done {
+		connID := udpConnID(ip, udp)
+		pkt := copyUDPPacket(raw, ip, udp)
+		track := t2s.getUDPConnTrack(connID, ip, udp)
+		track.newPacket(pkt)
+	}
+}
+
+type dnsCacheEntry struct {
+	msg *dns.Msg
+	exp time.Time
+}
+
+type dnsCache struct {
+	servers []string
+	mutex   sync.Mutex
+	storage map[string]*dnsCacheEntry
+}
+
+func packUint16(i uint16) []byte { return []byte{byte(i >> 8), byte(i)} }
+
+func cacheKey(q dns.Question) string {
+	return string(append([]byte(q.Name), packUint16(q.Qtype)...))
+}
+
+//TODO: need to adjust ttl
+func (c *dnsCache) query(payload []byte) *dns.Msg {
+	request := new(dns.Msg)
+	e := request.Unpack(payload)
+	if e != nil {
+		return nil
+	}
+	if len(request.Question) == 0 {
+		return nil
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	key := cacheKey(request.Question[0])
+	entry := c.storage[key]
+	if entry == nil {
+		return nil
+	}
+	if time.Now().After(entry.exp) {
+		delete(c.storage, key)
+		return nil
+	}
+	entry.msg.Id = request.Id
+	return entry.msg
+}
+
+func (c *dnsCache) store(payload []byte) {
+	resp := new(dns.Msg)
+	e := resp.Unpack(payload)
+	if e != nil {
+		return
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return
+	}
+	if len(resp.Question) == 0 || len(resp.Answer) == 0 {
+		return
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.storage[cacheKey(resp.Question[0])] = &dnsCacheEntry{
+		msg: resp,
+		exp: time.Now().Add(time.Duration(resp.Answer[0].Header().Ttl) * time.Second),
+	}
+}
+
+func (c *dnsCache) isDNS(remoteIP string, remotePort uint16) bool {
+	if remotePort != 53 {
+		return false
+	}
+	for _, s := range c.servers {
+		if s == remoteIP {
+			return true
+		}
+	}
+	return false
 }
