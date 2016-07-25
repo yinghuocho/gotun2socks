@@ -19,7 +19,7 @@ const (
 var (
 	localSocksDialer *gosocks.SocksDialer = &gosocks.SocksDialer{
 		Auth:    &gosocks.AnonymousClientAuthenticator{},
-		Timeout: 1 * time.Minute,
+		Timeout: 1 * time.Second,
 	}
 
 	_, ip1, _ = net.ParseCIDR("10.0.0.0/8")
@@ -107,6 +107,7 @@ func (t2s *Tun2Socks) Run() {
 					releaseUDPPacket(udp)
 				}
 			case <-t2s.writerStopCh:
+				log.Printf("quit tun2socks writer")
 				return
 			}
 		}
@@ -120,13 +121,14 @@ func (t2s *Tun2Socks) Run() {
 	for {
 		select {
 		case <-t2s.readerStopCh:
+			log.Printf("quit tun2socks reader")
 			return
 		default:
 			n, e := t2s.dev.Read(buf[:])
 			if e != nil {
 				// TODO: stop at critical error
 				log.Printf("read packet error: %s", e)
-				continue
+				return
 			}
 			e = packet.ParseIPv4(buf[:n], &ip)
 			if e != nil {

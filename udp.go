@@ -153,8 +153,8 @@ func (ut *udpConnTrack) run() {
 		if e != nil {
 			log.Printf("fail to connect SOCKS proxy: %s", e)
 		} else {
-			// need to finish handshake in 2 mins
-			ut.socksConn.SetDeadline(time.Now().Add(time.Minute * 2))
+			// need to finish handshake in 1 mins
+			ut.socksConn.SetDeadline(time.Now().Add(time.Minute * 1))
 			break
 		}
 	}
@@ -219,11 +219,17 @@ func (ut *udpConnTrack) run() {
 	// monitor socks TCP connection
 	go gosocks.ConnMonitor(ut.socksConn, ut.socksClosed)
 	// read UDP packets from relay
+	quitUDP := make(chan bool)
 	chRelayUDP := make(chan *gosocks.UDPPacket)
-	go gosocks.UDPReader(udpBind, chRelayUDP)
+	go gosocks.UDPReader(udpBind, chRelayUDP, quitUDP)
 
 	for {
-		t := time.NewTimer(2 * time.Minute)
+		var t *time.Timer
+		if ut.t2s.cache.isDNS(ut.remoteIP.String(), ut.remotePort) {
+			t = time.NewTimer(10 * time.Second)
+		} else {
+			t = time.NewTimer(2 * time.Minute)
+		}
 		select {
 		// pkt from relay
 		case pkt, ok := <-chRelayUDP:
@@ -232,6 +238,7 @@ func (ut *udpConnTrack) run() {
 				udpBind.Close()
 				close(ut.quitBySelf)
 				ut.t2s.clearUDPConnTrack(ut.id)
+				close(quitUDP)
 				return
 			}
 			if pkt.Addr.String() != relayAddr.String() {
@@ -245,10 +252,18 @@ func (ut *udpConnTrack) run() {
 			if udpReq.Frag != gosocks.SocksNoFragment {
 				continue
 			}
-			if ut.t2s.cache.isDNS(ut.remoteIP.String(), ut.remotePort) {
-				ut.t2s.cache.store(udpReq.Data)
-			}
 			ut.send(udpReq.Data)
+			if ut.t2s.cache.isDNS(ut.remoteIP.String(), ut.remotePort) {
+				// DNS-without-fragment only has one request-response
+				log.Printf("DNS session, cache then end")
+				ut.t2s.cache.store(udpReq.Data)
+				ut.socksConn.Close()
+				udpBind.Close()
+				close(ut.quitBySelf)
+				ut.t2s.clearUDPConnTrack(ut.id)
+				close(quitUDP)
+				return
+			}
 
 		// pkt from tun
 		case pkt := <-ut.fromTunCh:
@@ -268,6 +283,7 @@ func (ut *udpConnTrack) run() {
 				udpBind.Close()
 				close(ut.quitBySelf)
 				ut.t2s.clearUDPConnTrack(ut.id)
+				close(quitUDP)
 				return
 			}
 
@@ -276,6 +292,7 @@ func (ut *udpConnTrack) run() {
 			udpBind.Close()
 			close(ut.quitBySelf)
 			ut.t2s.clearUDPConnTrack(ut.id)
+			close(quitUDP)
 			return
 
 		case <-t.C:
@@ -283,11 +300,14 @@ func (ut *udpConnTrack) run() {
 			udpBind.Close()
 			close(ut.quitBySelf)
 			ut.t2s.clearUDPConnTrack(ut.id)
+			close(quitUDP)
 			return
 
 		case <-ut.quitByOther:
+			log.Printf("udpConnTrack quitByOther")
 			ut.socksConn.Close()
 			udpBind.Close()
+			close(quitUDP)
 			return
 		}
 		t.Stop()

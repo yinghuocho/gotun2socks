@@ -680,7 +680,8 @@ func (tt *tcpConnTrack) run() {
 			return
 
 		case <-tt.quitByOther:
-			// who closes this channel should be responbile to clear track map
+			// who closes this channel should be responsible to clear track map
+			log.Printf("tcpConnTrack quitByOther")
 			if tt.socksConn != nil {
 				tt.socksConn.Close()
 			}
