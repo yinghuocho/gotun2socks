@@ -478,11 +478,16 @@ func (tt *tcpConnTrack) tcpSocks2Tun(dstIP net.IP, dstPort uint16, conn net.Conn
 		var wnd int32
 		var cur int32
 		wnd = atomic.LoadInt32(&tt.sendWindow)
-		for wnd <= 0 {
-			tt.sendWndCond.Wait()
-			wnd = atomic.LoadInt32(&tt.sendWindow)
 
+		if wnd <= 0 {
+			for wnd <= 0 {
+				tt.sendWndCond.L.Lock()
+				tt.sendWndCond.Wait()
+				wnd = atomic.LoadInt32(&tt.sendWindow)
+			}
+			tt.sendWndCond.L.Unlock()
 		}
+
 		cur = wnd
 		if cur > MTU-40 {
 			cur = MTU - 40
