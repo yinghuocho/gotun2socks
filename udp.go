@@ -225,7 +225,7 @@ func (ut *udpConnTrack) run() {
 
 	for {
 		var t *time.Timer
-		if ut.t2s.cache.isDNS(ut.remoteIP.String(), ut.remotePort) {
+		if ut.t2s.isDNS(ut.remoteIP.String(), ut.remotePort) {
 			t = time.NewTimer(10 * time.Second)
 		} else {
 			t = time.NewTimer(2 * time.Minute)
@@ -253,10 +253,12 @@ func (ut *udpConnTrack) run() {
 				continue
 			}
 			ut.send(udpReq.Data)
-			if ut.t2s.cache.isDNS(ut.remoteIP.String(), ut.remotePort) {
+			if ut.t2s.isDNS(ut.remoteIP.String(), ut.remotePort) {
 				// DNS-without-fragment only has one request-response
-				log.Printf("DNS session, cache then end")
-				ut.t2s.cache.store(udpReq.Data)
+				log.Printf("DNS session")
+				if ut.t2s.cache != nil {
+					ut.t2s.cache.store(udpReq.Data)
+				}
 				ut.socksConn.Close()
 				udpBind.Close()
 				close(ut.quitBySelf)
@@ -370,7 +372,7 @@ func (t2s *Tun2Socks) udp(raw []byte, ip *packet.IPv4, udp *packet.UDP) {
 	var done bool = false
 
 	// first look at dns cache
-	if t2s.cache.isDNS(ip.DstIP.String(), udp.DstPort) {
+	if t2s.cache != nil && t2s.isDNS(ip.DstIP.String(), udp.DstPort) {
 		answer := t2s.cache.query(udp.Payload)
 		if answer != nil {
 			data, e := answer.PackBuffer(buf[:])
@@ -415,7 +417,18 @@ func cacheKey(q dns.Question) string {
 	return string(append([]byte(q.Name), packUint16(q.Qtype)...))
 }
 
-//TODO: need to adjust ttl
+func (t2s *Tun2Socks) isDNS(remoteIP string, remotePort uint16) bool {
+	if remotePort != 53 {
+		return false
+	}
+	for _, s := range t2s.dnsServers {
+		if s == remoteIP {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *dnsCache) query(payload []byte) *dns.Msg {
 	request := new(dns.Msg)
 	e := request.Unpack(payload)
@@ -460,16 +473,4 @@ func (c *dnsCache) store(payload []byte) {
 		msg: resp,
 		exp: time.Now().Add(time.Duration(resp.Answer[0].Header().Ttl) * time.Second),
 	}
-}
-
-func (c *dnsCache) isDNS(remoteIP string, remotePort uint16) bool {
-	if remotePort != 53 {
-		return false
-	}
-	for _, s := range c.servers {
-		if s == remoteIP {
-			return true
-		}
-	}
-	return false
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yinghuocho/gosocks"
@@ -31,6 +32,9 @@ const (
 	CLOSING     tcpState = 0x5
 	LAST_ACK    tcpState = 0x6
 	TIME_WAIT   tcpState = 0x7
+
+	MAX_RECV_WINDOW int = 65535
+	MAX_SEND_WINDOW int = 65535
 )
 
 type tcpConnTrack struct {
@@ -57,6 +61,12 @@ type tcpConnTrack struct {
 	rcvNxtSeq uint32
 	// what I have acked
 	lastAck uint32
+
+	// flow control
+	recvWindow  int32
+	sendWindow  int32
+	sendWndCond *sync.Cond
+	// recvWndCond *sync.Cond
 
 	localIP    net.IP
 	remoteIP   net.IP
@@ -209,7 +219,7 @@ func rst(srcIP net.IP, dstIP net.IP, srcPort uint16, dstPort uint16, seq uint32,
 
 	tcphdr.DstPort = srcPort
 	tcphdr.SrcPort = dstPort
-	tcphdr.Window = 65535
+	tcphdr.Window = uint16(MAX_RECV_WINDOW)
 	tcphdr.RST = true
 	tcphdr.ACK = true
 	tcphdr.Seq = 0
@@ -263,6 +273,15 @@ func (tt *tcpConnTrack) relayPayload(pkt *tcpPacket) bool {
 	select {
 	case tt.toSocksCh <- pkt:
 		tt.rcvNxtSeq += payloadLen
+
+		// reduce window when recved
+		wnd := atomic.LoadInt32(&tt.recvWindow)
+		wnd -= int32(payloadLen)
+		if wnd < 0 {
+			wnd = 0
+		}
+		atomic.StoreInt32(&tt.recvWindow, wnd)
+
 		return true
 	case <-tt.socksCloseCh:
 		return false
@@ -289,11 +308,13 @@ func (tt *tcpConnTrack) synAck(syn *tcpPacket) {
 
 	tcphdr.SrcPort = tt.remotePort
 	tcphdr.DstPort = tt.localPort
-	tcphdr.Window = 65535
+	tcphdr.Window = uint16(atomic.LoadInt32(&tt.recvWindow))
 	tcphdr.SYN = true
 	tcphdr.ACK = true
 	tcphdr.Seq = tt.nxtSeq
 	tcphdr.Ack = tt.rcvNxtSeq
+
+	tcphdr.Options = []packet.TCPOption{{2, 4, []byte{0x5, 0xb4}}}
 
 	synAck := packTCP(iphdr, tcphdr)
 	tt.send(synAck)
@@ -313,7 +334,7 @@ func (tt *tcpConnTrack) finAck() {
 
 	tcphdr.SrcPort = tt.remotePort
 	tcphdr.DstPort = tt.localPort
-	tcphdr.Window = 65535
+	tcphdr.Window = uint16(atomic.LoadInt32(&tt.recvWindow))
 	tcphdr.FIN = true
 	tcphdr.ACK = true
 	tcphdr.Seq = tt.nxtSeq
@@ -337,7 +358,7 @@ func (tt *tcpConnTrack) ack() {
 
 	tcphdr.SrcPort = tt.remotePort
 	tcphdr.DstPort = tt.localPort
-	tcphdr.Window = 65535
+	tcphdr.Window = uint16(atomic.LoadInt32(&tt.recvWindow))
 	tcphdr.ACK = true
 	tcphdr.Seq = tt.nxtSeq
 	tcphdr.Ack = tt.rcvNxtSeq
@@ -358,7 +379,7 @@ func (tt *tcpConnTrack) payload(data []byte) {
 
 	tcphdr.SrcPort = tt.remotePort
 	tcphdr.DstPort = tt.localPort
-	tcphdr.Window = 65535
+	tcphdr.Window = uint16(atomic.LoadInt32(&tt.recvWindow))
 	tcphdr.ACK = true
 	tcphdr.PSH = true
 	tcphdr.Seq = tt.nxtSeq
@@ -400,7 +421,7 @@ func (tt *tcpConnTrack) stateClosed(syn *tcpPacket) (continu bool, release bool)
 	return true, true
 }
 
-func tcpSocks2Tun(dstIP net.IP, dstPort uint16, conn net.Conn, readCh chan<- []byte, writeCh <-chan *tcpPacket, closeCh chan bool) {
+func (tt *tcpConnTrack) tcpSocks2Tun(dstIP net.IP, dstPort uint16, conn net.Conn, readCh chan<- []byte, writeCh <-chan *tcpPacket, closeCh chan bool) {
 	_, e := gosocks.WriteSocksRequest(conn, &gosocks.SocksRequest{
 		Cmd:      gosocks.SocksCmdConnect,
 		HostType: gosocks.SocksIPv4Host,
@@ -435,6 +456,15 @@ func tcpSocks2Tun(dstIP net.IP, dstPort uint16, conn net.Conn, readCh chan<- []b
 				break loop
 			case pkt := <-writeCh:
 				conn.Write(pkt.tcp.Payload)
+
+				// increase window when processed
+				wnd := atomic.LoadInt32(&tt.recvWindow)
+				wnd += int32(len(pkt.tcp.Payload))
+				if wnd > int32(MAX_RECV_WINDOW) {
+					wnd = int32(MAX_RECV_WINDOW)
+				}
+				atomic.StoreInt32(&tt.recvWindow, wnd)
+
 				releaseTCPPacket(pkt)
 			}
 		}
@@ -443,7 +473,23 @@ func tcpSocks2Tun(dstIP net.IP, dstPort uint16, conn net.Conn, readCh chan<- []b
 	// reader
 	for {
 		var buf [MTU - 40]byte
-		n, e := conn.Read(buf[:])
+
+		// tt.sendWndCond.L.Lock()
+		var wnd int32
+		var cur int32
+		wnd = atomic.LoadInt32(&tt.sendWindow)
+		for wnd <= 0 {
+			tt.sendWndCond.Wait()
+			wnd = atomic.LoadInt32(&tt.sendWindow)
+
+		}
+		cur = wnd
+		if cur > MTU-40 {
+			cur = MTU - 40
+		}
+		// tt.sendWndCond.L.Unlock()
+
+		n, e := conn.Read(buf[:cur])
 		if e != nil {
 			log.Printf("error to read from socks: %s", e)
 			conn.Close()
@@ -452,6 +498,16 @@ func tcpSocks2Tun(dstIP net.IP, dstPort uint16, conn net.Conn, readCh chan<- []b
 			b := make([]byte, n)
 			copy(b, buf[:n])
 			readCh <- b
+
+			// tt.sendWndCond.L.Lock()
+			nxt := wnd - int32(n)
+			if nxt < 0 {
+				nxt = 0
+			}
+			// if sendWindow does not equal to wnd, it is already updated by a
+			// received pkt from TUN
+			atomic.CompareAndSwapInt32(&tt.sendWindow, wnd, nxt)
+			// tt.sendWndCond.L.Unlock()
 		}
 	}
 	close(closeCh)
@@ -480,7 +536,7 @@ func (tt *tcpConnTrack) stateSynRcvd(pkt *tcpPacket) (continu bool, release bool
 	continu = true
 	release = true
 	tt.changeState(ESTABLISHED)
-	go tcpSocks2Tun(tt.remoteIP, uint16(tt.remotePort), tt.socksConn, tt.fromSocksCh, tt.toSocksCh, tt.socksCloseCh)
+	go tt.tcpSocks2Tun(tt.remoteIP, uint16(tt.remotePort), tt.socksConn, tt.fromSocksCh, tt.toSocksCh, tt.socksCloseCh)
 	if len(pkt.tcp.Payload) != 0 {
 		if tt.relayPayload(pkt) {
 			// pkt hands to socks writer
@@ -610,6 +666,13 @@ func (tt *tcpConnTrack) newPacket(pkt *tcpPacket) {
 	}
 }
 
+func (tt *tcpConnTrack) updateSendWindow(pkt *tcpPacket) {
+	// tt.sendWndCond.L.Lock()
+	atomic.StoreInt32(&tt.sendWindow, int32(pkt.tcp.Window))
+	tt.sendWndCond.Signal()
+	// tt.sendWndCond.L.Unlock()
+}
+
 func (tt *tcpConnTrack) run() {
 	for {
 		var ackTimer *time.Timer
@@ -622,7 +685,7 @@ func (tt *tcpConnTrack) run() {
 		if tt.state == ESTABLISHED {
 			socksCloseCh = tt.socksCloseCh
 			fromSocksCh = tt.fromSocksCh
-			ackTimer = time.NewTimer(100 * time.Millisecond)
+			ackTimer = time.NewTimer(10 * time.Millisecond)
 			ackTimeout = ackTimer.C
 		}
 
@@ -630,6 +693,8 @@ func (tt *tcpConnTrack) run() {
 		case pkt := <-tt.input:
 			// log.Printf("--> [TCP][%s][%s][%s][seq:%d][ack:%d][payload:%d]", tt.id, tcpstateString(tt.state), tcpflagsString(pkt.tcp), pkt.tcp.Seq, pkt.tcp.Ack, len(pkt.tcp.Payload))
 			var continu, release bool
+
+			tt.updateSendWindow(pkt)
 			switch tt.state {
 			case CLOSED:
 				continu, release = tt.stateClosed(pkt)
@@ -708,6 +773,10 @@ func (t2s *Tun2Socks) createTCPConnTrack(id string, ip *packet.IPv4, tcp *packet
 		socksCloseCh: make(chan bool),
 		quitBySelf:   make(chan bool),
 		quitByOther:  make(chan bool),
+
+		sendWindow:  int32(MAX_SEND_WINDOW),
+		recvWindow:  int32(MAX_RECV_WINDOW),
+		sendWndCond: &sync.Cond{L: &sync.Mutex{}},
 
 		localPort:      tcp.SrcPort,
 		remotePort:     tcp.DstPort,

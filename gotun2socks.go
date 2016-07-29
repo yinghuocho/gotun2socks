@@ -41,7 +41,9 @@ type Tun2Socks struct {
 
 	udpConnTrackLock sync.Mutex
 	udpConnTrackMap  map[string]*udpConnTrack
-	cache            *dnsCache
+
+	dnsServers []string
+	cache      *dnsCache
 }
 
 func isPrivate(ip net.IP) bool {
@@ -52,8 +54,8 @@ func dialLocalSocks(localAddr string) (*gosocks.SocksConn, error) {
 	return localSocksDialer.Dial(localAddr)
 }
 
-func New(dev *os.File, localSocksAddr string, dnsServers []string, publicOnly bool) *Tun2Socks {
-	return &Tun2Socks{
+func New(dev *os.File, localSocksAddr string, dnsServers []string, publicOnly bool, enableDnsCache bool) *Tun2Socks {
+	t2s := &Tun2Socks{
 		dev:             dev,
 		localSocksAddr:  localSocksAddr,
 		publicOnly:      publicOnly,
@@ -62,11 +64,14 @@ func New(dev *os.File, localSocksAddr string, dnsServers []string, publicOnly bo
 		writeCh:         make(chan interface{}, 10000),
 		tcpConnTrackMap: make(map[string]*tcpConnTrack),
 		udpConnTrackMap: make(map[string]*udpConnTrack),
-		cache: &dnsCache{
-			servers: dnsServers,
-			storage: make(map[string]*dnsCacheEntry),
-		},
+		dnsServers:      dnsServers,
 	}
+	if enableDnsCache {
+		t2s.cache = &dnsCache{
+			storage: make(map[string]*dnsCacheEntry),
+		}
+	}
+	return t2s
 }
 
 func (t2s *Tun2Socks) Stop() {
