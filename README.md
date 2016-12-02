@@ -1,6 +1,8 @@
 # gotun2socks
 
-A Golang implementation of tun2socks
+A Golang implementation of tun2socks, including a library and a binary program. 
+
+The binary program now works on Linux and OS X. It also runs on Windows, but has some issues to be really useful. 
 
 ## Usage
 
@@ -16,4 +18,5 @@ This implementation forwards UDP using standard SOCKS5 UDP request/reply. Thus t
 - https://github.com/google/gopacket
 - https://github.com/ambrop72/badvpn/
 - https://github.com/songgao/water
+- https://github.com/FlexibleBroadband/tun-go
 
