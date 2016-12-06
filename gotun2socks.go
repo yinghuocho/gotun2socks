@@ -1,7 +1,6 @@
 package gotun2socks
 
 import (
-	"bytes"
 	"io"
 	"log"
 	"net"
@@ -29,8 +28,6 @@ var (
 
 type Tun2Socks struct {
 	dev            io.ReadWriteCloser
-	devAddr        string
-	devGW          string
 	localSocksAddr string
 	publicOnly     bool
 
@@ -55,11 +52,9 @@ func dialLocalSocks(localAddr string) (*gosocks.SocksConn, error) {
 	return localSocksDialer.Dial(localAddr)
 }
 
-func New(dev io.ReadWriteCloser, devAddr string, devGW string, localSocksAddr string, dnsServers []string, publicOnly bool, enableDnsCache bool) *Tun2Socks {
+func New(dev io.ReadWriteCloser, localSocksAddr string, dnsServers []string, publicOnly bool, enableDnsCache bool) *Tun2Socks {
 	t2s := &Tun2Socks{
 		dev:             dev,
-		devAddr:         devAddr,
-		devGW:           devGW,
 		localSocksAddr:  localSocksAddr,
 		publicOnly:      publicOnly,
 		writerStopCh:    make(chan bool, 10),
@@ -79,7 +74,6 @@ func New(dev io.ReadWriteCloser, devAddr string, devGW string, localSocksAddr st
 func (t2s *Tun2Socks) Stop() {
 	t2s.writerStopCh <- true
 	t2s.dev.Close()
-	sendStopMarker(t2s.devAddr+":2222", t2s.devGW+":2222", []byte{2, 2, 2, 2})
 
 	t2s.tcpConnTrackLock.Lock()
 	defer t2s.tcpConnTrackLock.Unlock()
@@ -92,17 +86,6 @@ func (t2s *Tun2Socks) Stop() {
 	for _, udpTrack := range t2s.udpConnTrackMap {
 		close(udpTrack.quitByOther)
 	}
-}
-
-func sendStopMarker(laddr, raddr string, buf []byte) {
-	local, _ := net.ResolveUDPAddr("udp", laddr)
-	svr, _ := net.ResolveUDPAddr("udp", raddr)
-	conn, err := net.DialUDP("udp", local, svr)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	conn.Write(buf)
 }
 
 func (t2s *Tun2Socks) Run() {
@@ -146,15 +129,11 @@ func (t2s *Tun2Socks) Run() {
 			log.Printf("error to parse IPv4: %s", e)
 			continue
 		}
-		if ip.DstIP.String() == t2s.devAddr {
-			log.Println("gotun2socks received stop marker, return")
-			return
-		}
 		if t2s.publicOnly {
 			if !ip.DstIP.IsGlobalUnicast() {
 				continue
 			}
-			if isPrivate(ip.DstIP) && ip.DstIP.String() != t2s.devGW {
+			if isPrivate(ip.DstIP) {
 				continue
 			}
 		}
@@ -173,10 +152,6 @@ func (t2s *Tun2Socks) Run() {
 			if e != nil {
 				log.Printf("error to parse UDP: %s", e)
 				continue
-			}
-			if ip.DstIP.String() == t2s.devGW && udp.DstPort == 2222 && bytes.Compare(udp.Payload, []byte{2, 2, 2, 2}) == 0 {
-				log.Println("gotun2socks received stop marker, return")
-				return
 			}
 			t2s.udp(data, &ip, &udp)
 

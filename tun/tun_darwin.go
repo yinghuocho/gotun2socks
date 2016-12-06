@@ -1,4 +1,4 @@
-package main
+package tun
 
 import (
 	"fmt"
@@ -25,13 +25,15 @@ type sockaddrCtl struct {
 
 type utunDev struct {
 	f *os.File
+
+	rBuf [2048]byte
+	wBuf [2048]byte
 }
 
 func (dev *utunDev) Read(data []byte) (int, error) {
-	var buf [2048]byte
-	n, e := dev.f.Read(buf[:])
+	n, e := dev.f.Read(dev.rBuf[:])
 	if n > 0 {
-		copy(data, buf[4:n])
+		copy(data, dev.rBuf[4:n])
 		n -= 4
 	}
 	return n, e
@@ -39,10 +41,8 @@ func (dev *utunDev) Read(data []byte) (int, error) {
 
 // one packet, no more than MTU
 func (dev *utunDev) Write(data []byte) (int, error) {
-	var buf [2048]byte
-	copy(buf[:], []byte{0, 0, 0, 2})
-	n := copy(buf[4:], data)
-	return dev.f.Write(buf[:n+4])
+	n := copy(dev.wBuf[4:], data)
+	return dev.f.Write(dev.wBuf[:n+4])
 }
 
 func (dev *utunDev) Close() error {
@@ -51,7 +51,7 @@ func (dev *utunDev) Close() error {
 
 var sockaddrCtlSize uintptr = 32
 
-func openTunDevice(name, addr, gw, mask string) (io.ReadWriteCloser, error) {
+func OpenTunDevice(name, addr, gw, mask string, dns []string) (io.ReadWriteCloser, error) {
 	fd, err := syscall.Socket(syscall.AF_SYSTEM, syscall.SOCK_DGRAM, 2)
 	if err != nil {
 		return nil, err
@@ -98,7 +98,9 @@ func openTunDevice(name, addr, gw, mask string) (io.ReadWriteCloser, error) {
 		return nil, err
 	}
 
-	return &utunDev{
+	dev := &utunDev{
 		f: os.NewFile(uintptr(fd), string(ifName.name[:ifNameSize-1])),
-	}, nil
+	}
+	copy(dev.wBuf[:], []byte{0, 0, 0, 2})
+	return dev, nil
 }
