@@ -305,7 +305,7 @@ func (dev *winTapDev) Read(data []byte) (int, error) {
 			nr = int(done)
 		}
 		if nr > 14 {
-			if isStopMarker(data[14:nr], dev.addrIP, dev.gwIP) {
+			if isStopMarker(dev.rBuf[14:nr], dev.addrIP, dev.gwIP) {
 				return 0, errors.New("received stop marker")
 			}
 
