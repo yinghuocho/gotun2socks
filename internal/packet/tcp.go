@@ -59,6 +59,10 @@ func ReleaseTCP(tcp *TCP) {
 }
 
 func ParseTCP(pkt []byte, tcp *TCP) error {
+	if len(pkt) < 20 {
+		return fmt.Errorf("payload too small for TCP: %d bytes", len(pkt))
+	}
+
 	tcp.SrcPort = binary.BigEndian.Uint16(pkt[0:2])
 	tcp.DstPort = binary.BigEndian.Uint16(pkt[2:4])
 	tcp.Seq = binary.BigEndian.Uint32(pkt[4:8])
@@ -81,6 +85,9 @@ func ParseTCP(pkt []byte, tcp *TCP) error {
 		return fmt.Errorf("Invalid TCP data offset %d < 5", tcp.DataOffset)
 	}
 	dataStart := int(tcp.DataOffset) * 4
+	if dataStart < 20 {
+		return fmt.Errorf("TCP data offset too small: %d", dataStart)
+	}
 	if dataStart > len(pkt) {
 		return errors.New("TCP data offset greater than packet length")
 	}
@@ -168,7 +175,7 @@ func (tcp *TCP) flagsAndOffset() uint16 {
 	return f
 }
 
-func (tcp *TCP) Serialize(hdr []byte, full []byte) error {
+func (tcp *TCP) Serialize(hdr []byte, ckFields ...[]byte) error {
 	if tcp.HeaderLength() != len(hdr) {
 		return fmt.Errorf("incorrect buffer size: %d buffer given, %d needed", len(hdr), tcp.HeaderLength())
 	}
@@ -196,7 +203,7 @@ func (tcp *TCP) Serialize(hdr []byte, full []byte) error {
 
 	hdr[16] = 0
 	hdr[17] = 0
-	tcp.Checksum = Checksum(full)
+	tcp.Checksum = Checksum(ckFields...)
 	binary.BigEndian.PutUint16(hdr[16:], tcp.Checksum)
 	return nil
 }

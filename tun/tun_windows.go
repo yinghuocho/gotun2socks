@@ -368,6 +368,7 @@ func getOverlappedResult(h windows.Handle, overlapped *windows.Overlapped) (int,
 }
 
 func (dev *winTapDev) Close() error {
+	log.Printf("close winTap device")
 	sendStopMarker(dev.addr, dev.gw)
 	return windows.Close(dev.fd)
 }

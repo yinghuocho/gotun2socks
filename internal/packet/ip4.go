@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 type IPv4Option struct {
@@ -69,6 +70,8 @@ var (
 			return &IPv4{}
 		},
 	}
+
+	globalIPID uint32
 )
 
 func ReleaseIPv4(ip4 *IPv4) {
@@ -87,6 +90,10 @@ func NewIPv4() *IPv4 {
 	ip4 := ipv4Pool.Get().(*IPv4)
 	*ip4 = zero
 	return ip4
+}
+
+func IPID() uint16 {
+	return uint16(atomic.AddUint32(&globalIPID, 1) & 0x0000ffff)
 }
 
 func ParseIPv4(pkt []byte, ip4 *IPv4) error {
@@ -237,3 +244,4 @@ func (ip *IPv4) Serialize(hdr []byte, dataLen int) error {
 	binary.BigEndian.PutUint16(hdr[10:], ip.Checksum)
 	return nil
 }
+

@@ -152,24 +152,22 @@ func copyTCPPacket(raw []byte, ip *packet.IPv4, tcp *packet.TCP) *tcpPacket {
 	iphdr := packet.NewIPv4()
 	tcphdr := packet.NewTCP()
 	pkt := newTCPPacket()
-	if len(tcp.Payload) == 0 {
-		// shallow copy headers
-		// for now, we don't need deep copy if no payload
-		*iphdr = *ip
-		*tcphdr = *tcp
-		pkt.ip = iphdr
-		pkt.tcp = tcphdr
-	} else {
-		// get a block of buffer, make a deep copy
-		buf := newBuffer()
-		n := copy(buf, raw)
+
+	// make a deep copy
+	var buf []byte
+	if len(raw) <= MTU {
+		buf = newBuffer()
 		pkt.mtuBuf = buf
-		pkt.wire = buf[:n]
-		packet.ParseIPv4(pkt.wire, iphdr)
-		packet.ParseTCP(iphdr.Payload, tcphdr)
-		pkt.ip = iphdr
-		pkt.tcp = tcphdr
+	} else {
+		buf = make([]byte, len(raw))
 	}
+	n := copy(buf, raw)
+	pkt.wire = buf[:n]
+	packet.ParseIPv4(pkt.wire, iphdr)
+	packet.ParseTCP(iphdr.Payload, tcphdr)
+	pkt.ip = iphdr
+	pkt.tcp = tcphdr
+
 	return pkt
 }
 
@@ -212,6 +210,7 @@ func rst(srcIP net.IP, dstIP net.IP, srcPort uint16, dstPort uint16, seq uint32,
 	tcphdr := packet.NewTCP()
 
 	iphdr.Version = 4
+	iphdr.Id = packet.IPID()
 	iphdr.DstIP = srcIP
 	iphdr.SrcIP = dstIP
 	iphdr.TTL = 64
@@ -301,6 +300,7 @@ func (tt *tcpConnTrack) synAck(syn *tcpPacket) {
 	tcphdr := packet.NewTCP()
 
 	iphdr.Version = 4
+	iphdr.Id = packet.IPID()
 	iphdr.SrcIP = tt.remoteIP
 	iphdr.DstIP = tt.localIP
 	iphdr.TTL = 64
@@ -327,6 +327,7 @@ func (tt *tcpConnTrack) finAck() {
 	tcphdr := packet.NewTCP()
 
 	iphdr.Version = 4
+	iphdr.Id = packet.IPID()
 	iphdr.SrcIP = tt.remoteIP
 	iphdr.DstIP = tt.localIP
 	iphdr.TTL = 64
@@ -351,6 +352,7 @@ func (tt *tcpConnTrack) ack() {
 	tcphdr := packet.NewTCP()
 
 	iphdr.Version = 4
+	iphdr.Id = packet.IPID()
 	iphdr.SrcIP = tt.remoteIP
 	iphdr.DstIP = tt.localIP
 	iphdr.TTL = 64
@@ -372,6 +374,7 @@ func (tt *tcpConnTrack) payload(data []byte) {
 	tcphdr := packet.NewTCP()
 
 	iphdr.Version = 4
+	iphdr.Id = packet.IPID()
 	iphdr.SrcIP = tt.remoteIP
 	iphdr.DstIP = tt.localIP
 	iphdr.TTL = 64

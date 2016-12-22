@@ -2,10 +2,11 @@ package tun
 
 import (
 	"bytes"
+	"log"
 	"net"
 )
 
-var stopMarker []byte = []byte{2, 2, 2, 2, 2, 2, 2, 2}
+var stopMarker = []byte{2, 2, 2, 2, 2, 2, 2, 2}
 
 // Close of Windows and Linux tun/tap device do not interrupt blocking Read.
 // sendStopMarker is used to issue a specific packet to notify threads blocking
@@ -15,6 +16,7 @@ func sendStopMarker(src, dst string) {
 	r, _ := net.ResolveUDPAddr("udp", dst+":2222")
 	conn, err := net.DialUDP("udp", l, r)
 	if err != nil {
+		log.Printf("fail to send stopmarker: %s", err)
 		return
 	}
 	defer conn.Close()

@@ -36,16 +36,24 @@ func ReleaseUDP(udp *UDP) {
 }
 
 func ParseUDP(pkt []byte, udp *UDP) error {
+	if len(pkt) < 8 {
+		return fmt.Errorf("payload too small for UDP: %d bytes", len(pkt))
+	}
+
 	udp.SrcPort = binary.BigEndian.Uint16(pkt[0:2])
 	udp.DstPort = binary.BigEndian.Uint16(pkt[2:4])
 	udp.Length = binary.BigEndian.Uint16(pkt[4:6])
 	udp.Checksum = binary.BigEndian.Uint16(pkt[6:8])
-	udp.Payload = pkt[8:]
+	if len(pkt) > 8 {
+		udp.Payload = pkt[8:]
+	} else {
+		udp.Payload = nil
+	}
 
 	return nil
 }
 
-func (udp *UDP) Serialize(hdr []byte, full []byte) error {
+func (udp *UDP) Serialize(hdr []byte, ckFields ...[]byte) error {
 	if len(hdr) != 8 {
 		return fmt.Errorf("incorrect buffer size: %d buffer given, 8 needed", len(hdr))
 	}
@@ -55,7 +63,7 @@ func (udp *UDP) Serialize(hdr []byte, full []byte) error {
 	binary.BigEndian.PutUint16(hdr[4:], udp.Length)
 	hdr[6] = 0
 	hdr[7] = 0
-	udp.Checksum = Checksum(full)
+	udp.Checksum = Checksum(ckFields...)
 	binary.BigEndian.PutUint16(hdr[6:], udp.Checksum)
 	return nil
 }

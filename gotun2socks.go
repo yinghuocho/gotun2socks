@@ -42,6 +42,8 @@ type Tun2Socks struct {
 
 	dnsServers []string
 	cache      *dnsCache
+
+	wg sync.WaitGroup
 }
 
 func isPrivate(ip net.IP) bool {
@@ -86,11 +88,14 @@ func (t2s *Tun2Socks) Stop() {
 	for _, udpTrack := range t2s.udpConnTrackMap {
 		close(udpTrack.quitByOther)
 	}
+	t2s.wg.Wait()
 }
 
 func (t2s *Tun2Socks) Run() {
 	// writer
 	go func() {
+		t2s.wg.Add(1)
+		defer t2s.wg.Done()
 		for {
 			select {
 			case pkt := <-t2s.writeCh:
@@ -103,6 +108,10 @@ func (t2s *Tun2Socks) Run() {
 					udp := pkt.(*udpPacket)
 					t2s.dev.Write(udp.wire)
 					releaseUDPPacket(udp)
+				case *ipPacket:
+					ip := pkt.(*ipPacket)
+					t2s.dev.Write(ip.wire)
+					releaseIPPacket(ip)
 				}
 			case <-t2s.writerStopCh:
 				log.Printf("quit tun2socks writer")
@@ -116,6 +125,9 @@ func (t2s *Tun2Socks) Run() {
 	var ip packet.IPv4
 	var tcp packet.TCP
 	var udp packet.UDP
+
+	t2s.wg.Add(1)
+	defer t2s.wg.Done()
 	for {
 		n, e := t2s.dev.Read(buf[:])
 		if e != nil {
@@ -134,6 +146,16 @@ func (t2s *Tun2Socks) Run() {
 				continue
 			}
 			if isPrivate(ip.DstIP) {
+				continue
+			}
+		}
+
+		if ip.Flags&0x1 != 0 || ip.FragOffset != 0 {
+			last, pkt, raw := procFragment(&ip, data)
+			if last {
+				ip = *pkt
+				data = raw
+			} else {
 				continue
 			}
 		}
